@@ -1,13 +1,18 @@
 /*
  * Physically Based Rendering
- * Copyright (c) 2017 Michał Siejak
+ * Copyright (c) 2017-2018 Michał Siejak
+ *
+ * OpenGL 4.5 renderer.
  */
 
 #include <stdexcept>
 #include <memory>
-#include <GLFW/glfw3.h>
+
+#include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/euler_angles.hpp>
+
+#include <GLFW/glfw3.h>
 
 #include "common/mesh.hpp"
 #include "common/image.hpp"
@@ -90,10 +95,11 @@ void Renderer::shutdown()
 	}
 	deleteFrameBuffer(m_framebuffer);
 
+	glDeleteVertexArrays(1, &m_emptyVAO);
+
 	glDeleteBuffers(1, &m_transformUB);
 	glDeleteBuffers(1, &m_shadingUB);
 
-	deleteMeshBuffer(m_screenQuad);
 	deleteMeshBuffer(m_skybox);
 	deleteMeshBuffer(m_pbrModel);
 	
@@ -113,19 +119,26 @@ void Renderer::shutdown()
 
 void Renderer::setup()
 {
+	// Parameters
+	static constexpr int kEnvMapSize = 1024;
+	static constexpr int kIrradianceMapSize = 32;
+	static constexpr int kBRDF_LUT_Size = 256;
+
 	// Set global OpenGL state.
 	glEnable(GL_CULL_FACE);
 	glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 	glFrontFace(GL_CCW);
+
+	// Create empty VAO for rendering full screen triangle.
+	glCreateVertexArrays(1, &m_emptyVAO);
 
 	// Create uniform buffers.
 	m_transformUB = createUniformBuffer<TransformUB>();
 	m_shadingUB = createUniformBuffer<ShadingUB>();
 
 	// Load assets & compile/link rendering programs.
-	m_screenQuad = createClipSpaceQuad();
 	m_tonemapProgram = linkProgram({
-		compileShader("shaders/glsl/passthrough_vs.glsl", GL_VERTEX_SHADER),
+		compileShader("shaders/glsl/tonemap_vs.glsl", GL_VERTEX_SHADER),
 		compileShader("shaders/glsl/tonemap_fs.glsl", GL_FRAGMENT_SHADER)
 	});
 
@@ -152,7 +165,7 @@ void Renderer::setup()
 
 
 	// Unfiltered environment cube map (temporary).
-	Texture envTextureUnfiltered = createTexture(GL_TEXTURE_CUBE_MAP, 1024, 1024, GL_RGBA16F);
+	Texture envTextureUnfiltered = createTexture(GL_TEXTURE_CUBE_MAP, kEnvMapSize, kEnvMapSize, GL_RGBA16F);
 	
 	// Load & convert equirectangular environment map to a cubemap texture.
 	{
@@ -179,7 +192,7 @@ void Renderer::setup()
 			compileShader("shaders/glsl/spmap_cs.glsl", GL_COMPUTE_SHADER)
 		});
 
-		m_envTexture = createTexture(GL_TEXTURE_CUBE_MAP, 1024, 1024, GL_RGBA16F);
+		m_envTexture = createTexture(GL_TEXTURE_CUBE_MAP, kEnvMapSize, kEnvMapSize, GL_RGBA16F);
 
 		// Copy 0th mipmap level into destination environment map.
 		glCopyImageSubData(envTextureUnfiltered.id, GL_TEXTURE_CUBE_MAP, 0, 0, 0, 0,
@@ -191,7 +204,7 @@ void Renderer::setup()
 
 		// Pre-filter rest of the mip chain.
 		const float deltaRoughness = 1.0f / glm::max(float(m_envTexture.levels-1), 1.0f);
-		for(int level=1, size=512; level<=m_envTexture.levels; ++level, size/=2) {
+		for(int level=1, size=kEnvMapSize/2; level<=m_envTexture.levels; ++level, size/=2) {
 			const GLuint numGroups = glm::max(1, size/32);
 			glBindImageTexture(0, m_envTexture.id, level, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
 			glProgramUniform1f(spmapProgram, 0, level * deltaRoughness);
@@ -208,7 +221,7 @@ void Renderer::setup()
 			compileShader("shaders/glsl/irmap_cs.glsl", GL_COMPUTE_SHADER)
 		});
 
-		m_irmapTexture = createTexture(GL_TEXTURE_CUBE_MAP, 32, 32, GL_RGBA16F, 1);
+		m_irmapTexture = createTexture(GL_TEXTURE_CUBE_MAP, kIrradianceMapSize, kIrradianceMapSize, GL_RGBA16F, 1);
 
 		glUseProgram(irmapProgram);
 		glBindTextureUnit(0, m_envTexture.id);
@@ -223,7 +236,7 @@ void Renderer::setup()
 			compileShader("shaders/glsl/spbrdf_cs.glsl", GL_COMPUTE_SHADER)
 		});
 
-		m_spBRDF_LUT = createTexture(GL_TEXTURE_2D, 256, 256, GL_RG16F, 1);
+		m_spBRDF_LUT = createTexture(GL_TEXTURE_2D, kBRDF_LUT_Size, kBRDF_LUT_Size, GL_RG16F, 1);
 		glTextureParameteri(m_spBRDF_LUT.id, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTextureParameteri(m_spBRDF_LUT.id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
@@ -305,8 +318,8 @@ void Renderer::render(GLFWwindow* window, const ViewSettings& view, const SceneS
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glUseProgram(m_tonemapProgram);
 	glBindTextureUnit(0, m_resolveFramebuffer.colorTarget);
-	glBindVertexArray(m_screenQuad.vao);
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	glBindVertexArray(m_emptyVAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
 
 	glfwSwapBuffers(window);
 }
@@ -524,29 +537,6 @@ void Renderer::deleteMeshBuffer(MeshBuffer& buffer)
 		glDeleteBuffers(1, &buffer.ibo);
 	}
 	std::memset(&buffer, 0, sizeof(MeshBuffer));
-}
-	
-MeshBuffer Renderer::createClipSpaceQuad()
-{
-	static const GLfloat vertices[] = {
-		 1.0f,  1.0f, 1.0f, 1.0f,
-	    -1.0f,  1.0f, 0.0f, 1.0f,
-		 1.0f, -1.0f, 1.0f, 0.0f,
-		-1.0f, -1.0f, 0.0f, 0.0f,
-	};
-
-	MeshBuffer buffer;
-	glCreateBuffers(1, &buffer.vbo);
-	glNamedBufferStorage(buffer.vbo, sizeof(vertices), vertices, 0);
-
-	glCreateVertexArrays(1, &buffer.vao);
-	for(int i=0; i<2; ++i) {
-		glVertexArrayVertexBuffer(buffer.vao, i, buffer.vbo, i * 2 * sizeof(GLfloat), 4 * sizeof(GLfloat));
-		glEnableVertexArrayAttrib(buffer.vao, i);
-		glVertexArrayAttribFormat(buffer.vao, i, 2, GL_FLOAT, GL_FALSE, 0);
-		glVertexArrayAttribBinding(buffer.vao, i, i);
-	}
-	return buffer;
 }
 	
 GLuint Renderer::createUniformBuffer(const void* data, size_t size)

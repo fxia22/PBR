@@ -1,6 +1,8 @@
 ﻿/*
  * Physically Based Rendering
  * Copyright (c) 2017-2018 Michał Siejak
+ *
+ * Vulkan 1.0 renderer.
  */
 
 #pragma once
@@ -59,11 +61,11 @@ struct Texture
 struct RenderTarget
 {
 	Resource<VkImage> colorImage;
-	Resource<VkImage> depthStencilImage;
+	Resource<VkImage> depthImage;
 	VkImageView colorView;
-	VkImageView depthStencilView;
+	VkImageView depthView;
 	VkFormat colorFormat;
-	VkFormat depthStencilFormat;
+	VkFormat depthFormat;
 	uint32_t width, height;
 	uint32_t samples;
 };
@@ -84,6 +86,43 @@ struct UniformBufferAllocation
 	template<typename T> T* as() const
 	{
 		return reinterpret_cast<T*>(hostMemoryPtr);
+	}
+};
+
+struct ImageMemoryBarrier
+{
+	ImageMemoryBarrier(const Texture& texture, VkAccessFlags srcAccessMask, VkAccessFlags dstAccessMask, VkImageLayout oldLayout, VkImageLayout newLayout)
+	{
+		barrier.srcAccessMask = srcAccessMask;
+		barrier.dstAccessMask = dstAccessMask;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = texture.image.resource;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+		barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+	}
+	operator VkImageMemoryBarrier() const { return barrier; }
+	VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+
+	ImageMemoryBarrier& aspectMask(VkImageAspectFlags aspectMask)
+	{ 
+		barrier.subresourceRange.aspectMask = aspectMask;
+		return *this;
+	}
+	ImageMemoryBarrier& mipLevels(uint32_t baseMipLevel, uint32_t levelCount = VK_REMAINING_MIP_LEVELS)
+	{
+		barrier.subresourceRange.baseMipLevel = baseMipLevel;
+		barrier.subresourceRange.levelCount = levelCount;
+		return *this;
+	}
+	ImageMemoryBarrier& arrayLayers(uint32_t baseArrayLayer, uint32_t layerCount = VK_REMAINING_ARRAY_LAYERS)
+	{
+		barrier.subresourceRange.baseArrayLayer = baseArrayLayer;
+		barrier.subresourceRange.layerCount = layerCount;
+		return *this;
 	}
 };
 
@@ -110,7 +149,7 @@ private:
 	void generateMipmaps(const Texture& texture) const;
 	void destroyTexture(Texture& texture) const;
 
-	RenderTarget createRenderTarget(uint32_t width, uint32_t height, uint32_t samples, VkFormat colorFormat, VkFormat depthStencilFormat) const;
+	RenderTarget createRenderTarget(uint32_t width, uint32_t height, uint32_t samples, VkFormat colorFormat, VkFormat depthFormat) const;
 	void destroyRenderTarget(RenderTarget& rt) const;
 
 	UniformBuffer createUniformBuffer(VkDeviceSize capacity) const;
@@ -144,10 +183,13 @@ private:
 	VkCommandBuffer beginImmediateCommandBuffer() const;
 	void executeImmediateCommandBuffer(VkCommandBuffer commandBuffer) const;
 	void copyToDevice(VkDeviceMemory deviceMemory, const void* data, size_t size) const;
+	void pipelineBarrier(VkCommandBuffer commandBuffer, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask, const std::vector<ImageMemoryBarrier>& barriers) const;
+
 	void presentFrame();
 
 	PhyDevice choosePhyDevice(VkSurfaceKHR surface, const VkPhysicalDeviceFeatures& requiredFeatures, const std::vector<const char*>& requiredExtensions) const;
 	void queryPhyDeviceSurfaceCapabilities(PhyDevice& phyDevice, VkSurfaceKHR surface) const;
+	bool checkPhyDeviceImageFormatsSupport(PhyDevice& phyDevice) const;
 	
 	uint32_t queryRenderTargetFormatMaxSamples(VkFormat format, VkImageUsageFlags usage) const;
 	uint32_t chooseMemoryType(const VkMemoryRequirements& memoryRequirements, VkMemoryPropertyFlags preferredFlags, VkMemoryPropertyFlags requiredFlags=0) const;

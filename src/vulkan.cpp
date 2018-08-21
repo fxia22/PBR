@@ -1,6 +1,8 @@
 ﻿/*
  * Physically Based Rendering
  * Copyright (c) 2017-2018 Michał Siejak
+ *
+ * Vulkan 1.0 renderer.
  */
 
 #include <stdexcept>
@@ -46,38 +48,6 @@ struct SpecularFilterPushConstants
 {
 	uint32_t level;
 	float roughness;
-};
-
-// Return preferredValue if it's supported, otherwise return first supported value.
-template<typename T> T selectSupportedValue(T preferredValue, const std::vector<typename T>& supportedValues)
-{
-	assert(supportedValues.size() > 0);
-	if(std::find(supportedValues.begin(), supportedValues.end(), preferredValue) != supportedValues.end()) {
-		return preferredValue;
-	}
-	return supportedValues[0];
-}
-
-struct ImageMemoryBarrier
-{
-	ImageMemoryBarrier(
-		VkImage image, VkImageAspectFlags aspectMask,
-		VkAccessFlags srcAccessMask=0, VkAccessFlags dstAccessMask=0,
-		VkImageLayout oldLayout=VK_IMAGE_LAYOUT_UNDEFINED, VkImageLayout newLayout=VK_IMAGE_LAYOUT_GENERAL)
-	{
-		barrier.srcAccessMask = srcAccessMask;
-		barrier.dstAccessMask = dstAccessMask;
-		barrier.oldLayout = oldLayout;
-		barrier.newLayout = newLayout;
-		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		barrier.image = image;
-		barrier.subresourceRange.aspectMask = aspectMask;
-		barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
-		barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-	}
-	operator VkImageMemoryBarrier() const { return barrier; }
-	VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
 };
 
 GLFWwindow* Renderer::initialize(int width, int height, int maxSamples)
@@ -179,9 +149,17 @@ GLFWwindow* Renderer::initialize(int width, int height, int maxSamples)
 
 	// Create swap chain
 	{
+		uint32_t selectedMinImageCount = 2;
+		selectedMinImageCount = glm::clamp(selectedMinImageCount, m_phyDevice.surfaceCaps.minImageCount, m_phyDevice.surfaceCaps.maxImageCount);
+
+		VkPresentModeKHR selectedPresentMode = VK_PRESENT_MODE_FIFO_KHR;
+		if(std::find(m_phyDevice.presentModes.begin(), m_phyDevice.presentModes.end(), selectedPresentMode) == m_phyDevice.presentModes.end()) {
+			selectedPresentMode = m_phyDevice.presentModes[0];
+		}
+
 		VkSwapchainCreateInfoKHR createInfo = { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
 		createInfo.surface = m_surface;
-		createInfo.minImageCount = glm::clamp<uint32_t>(3, m_phyDevice.surfaceCaps.minImageCount, m_phyDevice.surfaceCaps.maxImageCount);
+		createInfo.minImageCount = selectedMinImageCount;
 		createInfo.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
 		createInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 		createInfo.imageExtent = m_phyDevice.surfaceCaps.currentExtent;
@@ -190,7 +168,7 @@ GLFWwindow* Renderer::initialize(int width, int height, int maxSamples)
 		createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 		createInfo.preTransform = m_phyDevice.surfaceCaps.currentTransform;
 		createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-		createInfo.presentMode = selectSupportedValue(VK_PRESENT_MODE_FIFO_KHR, m_phyDevice.presentModes);
+		createInfo.presentMode = selectedPresentMode;
 		createInfo.clipped = VK_TRUE;
 		createInfo.oldSwapchain = VK_NULL_HANDLE;
 		if(VKFAILED(vkCreateSwapchainKHR(m_device, &createInfo, nullptr, &m_swapchain))) {
@@ -228,18 +206,18 @@ GLFWwindow* Renderer::initialize(int width, int height, int maxSamples)
 	// Create render targets
 	{
 		const VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-		const VkFormat depthStencilFormat = VK_FORMAT_D24_UNORM_S8_UINT;
+		const VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
 
 		const uint32_t maxColorSamples = queryRenderTargetFormatMaxSamples(colorFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-		const uint32_t maxDepthStencilSamples = queryRenderTargetFormatMaxSamples(depthStencilFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+		const uint32_t maxDepthSamples = queryRenderTargetFormatMaxSamples(depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
 
-		m_renderSamples = std::min({uint32_t(maxSamples), maxColorSamples, maxDepthStencilSamples});
+		m_renderSamples = std::min({uint32_t(maxSamples), maxColorSamples, maxDepthSamples});
 		assert(m_renderSamples >= 1);
 
 		m_renderTargets.resize(m_numFrames);
 		m_resolveRenderTargets.resize(m_numFrames);
 		for(uint32_t i=0; i<m_numFrames; ++i) {
-			m_renderTargets[i] = createRenderTarget(width, height, m_renderSamples, colorFormat, depthStencilFormat);
+			m_renderTargets[i] = createRenderTarget(width, height, m_renderSamples, colorFormat, depthFormat);
 			if(m_renderSamples > 1) {
 				m_resolveRenderTargets[i] = createRenderTarget(width, height, 1, colorFormat, VK_FORMAT_UNDEFINED);
 			}
@@ -522,7 +500,7 @@ void Renderer::setup()
 			// Main depth-stencil attachment (1)
 			{
 				0,
-				m_renderTargets[0].depthStencilFormat,
+				m_renderTargets[0].depthFormat,
 				static_cast<VkSampleCountFlagBits>(m_renderSamples),
 				VK_ATTACHMENT_LOAD_OP_CLEAR,
 				VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -639,7 +617,7 @@ void Renderer::setup()
 
 			std::vector<VkImageView> attachments = {
 				m_renderTargets[i].colorView,
-				m_renderTargets[i].depthStencilView,
+				m_renderTargets[i].depthView,
 				m_swapchainViews[i],
 			};
 			if(m_renderSamples > 1) {
@@ -837,25 +815,15 @@ void Renderer::setup()
 
 			VkCommandBuffer commandBuffer = beginImmediateCommandBuffer();
 			{
-				VkImageMemoryBarrier preDispatchBarrier = ImageMemoryBarrier(
-					envTextureUnfiltered.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-					0, VK_ACCESS_SHADER_WRITE_BIT,
-					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-				preDispatchBarrier.subresourceRange.levelCount = 1;
-				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-					0, nullptr, 0, nullptr, 1, &preDispatchBarrier);
+				const auto preDispatchBarrier = ImageMemoryBarrier(envTextureUnfiltered, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL).mipLevels(0, 1);
+				pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, { preDispatchBarrier });
 
 				vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 				vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
 				vkCmdDispatch(commandBuffer, kEnvMapSize/32, kEnvMapSize/32, 6);
 
-				VkImageMemoryBarrier postDispatchBarrier = ImageMemoryBarrier(
-					envTextureUnfiltered.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-					VK_ACCESS_SHADER_WRITE_BIT, 0,
-					VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-				postDispatchBarrier.subresourceRange.levelCount = 1;
-				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-					0, nullptr, 0, nullptr, 1, &postDispatchBarrier);
+				const auto postDispatchBarrier = ImageMemoryBarrier(envTextureUnfiltered, VK_ACCESS_SHADER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).mipLevels(0, 1);
+				pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, { postDispatchBarrier });
 			}
 			executeImmediateCommandBuffer(commandBuffer);
 
@@ -882,31 +850,16 @@ void Renderer::setup()
 
 			// Copy base mipmap level into destination environment map.
 			{
-				VkImageMemoryBarrier preCopyBarriers[] = {
-					ImageMemoryBarrier(
-						envTextureUnfiltered.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-						0, VK_ACCESS_TRANSFER_READ_BIT,
-						VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
-					ImageMemoryBarrier(
-						m_envTexture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-						0, VK_ACCESS_TRANSFER_WRITE_BIT,
-						VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+				const std::vector<ImageMemoryBarrier> preCopyBarriers = {
+					ImageMemoryBarrier(envTextureUnfiltered, 0, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).mipLevels(0, 1),
+					ImageMemoryBarrier(m_envTexture, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL),
 				};
-				VkImageMemoryBarrier postCopyBarriers[] = {
-					ImageMemoryBarrier(
-						envTextureUnfiltered.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-						VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
-						VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-					ImageMemoryBarrier(
-						m_envTexture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-						VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-						VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL)
+				const std::vector<ImageMemoryBarrier> postCopyBarriers = {
+					ImageMemoryBarrier(envTextureUnfiltered, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL).mipLevels(0, 1),
+					ImageMemoryBarrier(m_envTexture, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL),
 				};
-				preCopyBarriers[0].subresourceRange.levelCount = 1;
-				postCopyBarriers[0].subresourceRange.levelCount = 1;
 
-				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-					0, nullptr, 0, nullptr, 2, preCopyBarriers);
+				pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, preCopyBarriers);
 
 				VkImageCopy copyRegion = {};
 				copyRegion.extent = { m_envTexture.width, m_envTexture.height, 1 };
@@ -918,8 +871,7 @@ void Renderer::setup()
 					m_envTexture.image.resource, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 					1, &copyRegion);
 
-				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-					0, nullptr, 0, nullptr, 2, postCopyBarriers);
+				pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, postCopyBarriers);
 			}
 				
 			// Pre-filter rest of the mip-chain.
@@ -947,12 +899,8 @@ void Renderer::setup()
 					vkCmdDispatch(commandBuffer, numGroups, numGroups, 6);
 				}
 
-				VkImageMemoryBarrier barrier = ImageMemoryBarrier(
-					m_envTexture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-					VK_ACCESS_SHADER_WRITE_BIT, 0,
-					VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-					0, nullptr, 0, nullptr, 1, &barrier);
+				const auto barrier = ImageMemoryBarrier(m_envTexture, VK_ACCESS_SHADER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+				pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, { barrier });
 			}
 
 			executeImmediateCommandBuffer(commandBuffer);
@@ -975,23 +923,15 @@ void Renderer::setup()
 
 			VkCommandBuffer commandBuffer = beginImmediateCommandBuffer();
 			{
-				VkImageMemoryBarrier preDispatchBarrier = ImageMemoryBarrier(
-					m_irmapTexture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-					0, VK_ACCESS_SHADER_WRITE_BIT,
-					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-					0, nullptr, 0, nullptr, 1, &preDispatchBarrier);
+				const auto preDispatchBarrier = ImageMemoryBarrier(m_irmapTexture, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+				pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, { preDispatchBarrier });
 
 				vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 				vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
 				vkCmdDispatch(commandBuffer, kIrradianceMapSize/32, kIrradianceMapSize/32, 6);
 
-				VkImageMemoryBarrier postDispatchBarrier = ImageMemoryBarrier(
-					m_irmapTexture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-					VK_ACCESS_SHADER_WRITE_BIT, 0,
-					VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-					0, nullptr, 0, nullptr, 1, &postDispatchBarrier);
+				const auto postDispatchBarrier = ImageMemoryBarrier(m_irmapTexture, VK_ACCESS_SHADER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+				pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, { postDispatchBarrier });
 			}
 			executeImmediateCommandBuffer(commandBuffer);
 			vkDestroyPipeline(m_device, pipeline, nullptr);
@@ -1006,23 +946,15 @@ void Renderer::setup()
 
 			VkCommandBuffer commandBuffer = beginImmediateCommandBuffer();
 			{
-				VkImageMemoryBarrier preDispatchBarrier = ImageMemoryBarrier(
-					m_spBRDF_LUT.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-					0, VK_ACCESS_SHADER_WRITE_BIT,
-					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-					0, nullptr, 0, nullptr, 1, &preDispatchBarrier);
+				const auto preDispatchBarrier = ImageMemoryBarrier(m_spBRDF_LUT, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+				pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, { preDispatchBarrier });
 
 				vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 				vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
 				vkCmdDispatch(commandBuffer, kBRDF_LUT_Size/32, kBRDF_LUT_Size/32, 6);
 
-				VkImageMemoryBarrier postDispatchBarrier = ImageMemoryBarrier(
-					m_spBRDF_LUT.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-					VK_ACCESS_SHADER_WRITE_BIT, 0,
-					VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-					0, nullptr, 0, nullptr, 1, &postDispatchBarrier);
+				const auto postDispatchBarrier = ImageMemoryBarrier(m_spBRDF_LUT, VK_ACCESS_SHADER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+				pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, { postDispatchBarrier });
 			}
 			executeImmediateCommandBuffer(commandBuffer);
 			vkDestroyPipeline(m_device, pipeline, nullptr);
@@ -1357,14 +1289,8 @@ Texture Renderer::createTexture(const std::shared_ptr<Image>& image, VkFormat fo
 
 	VkCommandBuffer commandBuffer = beginImmediateCommandBuffer();
 	{
-		VkImageMemoryBarrier barrier = ImageMemoryBarrier(
-			texture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-			0, VK_ACCESS_TRANSFER_WRITE_BIT,
-			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		barrier.subresourceRange.levelCount = 1;
-
-		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-			0, nullptr, 0, nullptr, 1, &barrier);
+		const auto barrier = ImageMemoryBarrier(texture, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).mipLevels(0, 1);
+		pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, { barrier });
 	}
 
 	VkBufferImageCopy copyRegion = {};
@@ -1381,14 +1307,8 @@ Texture Renderer::createTexture(const std::shared_ptr<Image>& image, VkFormat fo
 			? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
 			: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-		VkImageMemoryBarrier barrier = ImageMemoryBarrier(
-			texture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-			VK_ACCESS_TRANSFER_WRITE_BIT, 0,
-			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, finalBaseMipLayout);
-		barrier.subresourceRange.levelCount = 1;
-
-		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-			0, nullptr, 0, nullptr, 1, &barrier);
+		const auto barrier = ImageMemoryBarrier(texture, VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, finalBaseMipLayout).mipLevels(0, 1);
+		pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, { barrier });
 	}
 
 	executeImmediateCommandBuffer(commandBuffer);
@@ -1429,14 +1349,8 @@ void Renderer::generateMipmaps(const Texture& texture) const
 	// Iterate through mip chain and consecutively blit from previous level to next level with linear filtering.
 	for(uint32_t level=1, prevLevelWidth=texture.width, prevLevelHeight=texture.height; level<texture.levels; ++level, prevLevelWidth/=2, prevLevelHeight/=2) {
 
-		VkImageMemoryBarrier preBlitBarrier = ImageMemoryBarrier(
-			texture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-			0, VK_ACCESS_TRANSFER_WRITE_BIT,
-			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		preBlitBarrier.subresourceRange.baseMipLevel = level;
-		preBlitBarrier.subresourceRange.levelCount   = 1;
-		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-			0, nullptr, 0, nullptr, 1, &preBlitBarrier);
+		const auto preBlitBarrier = ImageMemoryBarrier(texture, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).mipLevels(level, 1);
+		pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, { preBlitBarrier });
 
 		VkImageBlit region = {};
 		region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level-1, 0, texture.layers };
@@ -1448,25 +1362,14 @@ void Renderer::generateMipmaps(const Texture& texture) const
 			texture.image.resource, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			1, &region, VK_FILTER_LINEAR);
 
-		VkImageMemoryBarrier postBlitBarrier = ImageMemoryBarrier(
-			texture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-		postBlitBarrier.subresourceRange.baseMipLevel = level;
-		postBlitBarrier.subresourceRange.levelCount   = 1;
-		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-			0, nullptr, 0, nullptr, 1, &postBlitBarrier);
+		const auto postBlitBarrier = ImageMemoryBarrier(texture, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).mipLevels(level, 1);
+		pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, { postBlitBarrier });
 	}
 
 	// Transition whole mip chain to shader read only layout.
 	{
-		VkImageMemoryBarrier barrier = ImageMemoryBarrier(
-			texture.image.resource, VK_IMAGE_ASPECT_COLOR_BIT,
-			VK_ACCESS_TRANSFER_WRITE_BIT, 0,
-			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-			0, nullptr, 0, nullptr, 1, &barrier);
+		const auto barrier = ImageMemoryBarrier(texture, VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		pipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, { barrier });
 	}
 
 	executeImmediateCommandBuffer(commandBuffer);
@@ -1480,7 +1383,7 @@ void Renderer::destroyTexture(Texture& texture) const
 	destroyImage(texture.image);
 }
 	
-RenderTarget Renderer::createRenderTarget(uint32_t width, uint32_t height, uint32_t samples, VkFormat colorFormat, VkFormat depthStencilFormat) const
+RenderTarget Renderer::createRenderTarget(uint32_t width, uint32_t height, uint32_t samples, VkFormat colorFormat, VkFormat depthFormat) const
 {
 	assert(samples > 0 && samples <= 64);
 	
@@ -1489,7 +1392,7 @@ RenderTarget Renderer::createRenderTarget(uint32_t width, uint32_t height, uint3
 	target.height = height;
 	target.samples = samples;
 	target.colorFormat = colorFormat;
-	target.depthStencilFormat = depthStencilFormat;
+	target.depthFormat = depthFormat;
 
 	VkImageUsageFlags colorImageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 	if(samples == 1) {
@@ -1499,8 +1402,8 @@ RenderTarget Renderer::createRenderTarget(uint32_t width, uint32_t height, uint3
 	if(colorFormat != VK_FORMAT_UNDEFINED) {
 		target.colorImage = createImage(width, height, 1, 1, colorFormat, samples, colorImageUsage);
 	}
-	if(depthStencilFormat != VK_FORMAT_UNDEFINED) {
-		target.depthStencilImage = createImage(width, height, 1, 1, depthStencilFormat, samples, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+	if(depthFormat != VK_FORMAT_UNDEFINED) {
+		target.depthImage = createImage(width, height, 1, 1, depthFormat, samples, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
 	}
 
 	VkImageViewCreateInfo viewCreateInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
@@ -1517,11 +1420,11 @@ RenderTarget Renderer::createRenderTarget(uint32_t width, uint32_t height, uint3
 		}
 	}
 
-	if(target.depthStencilImage.resource != VK_NULL_HANDLE) {
-		viewCreateInfo.image = target.depthStencilImage.resource;
-		viewCreateInfo.format = depthStencilFormat;
-		viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
-		if(VKFAILED(vkCreateImageView(m_device, &viewCreateInfo, nullptr, &target.depthStencilView))) {
+	if(target.depthImage.resource != VK_NULL_HANDLE) {
+		viewCreateInfo.image = target.depthImage.resource;
+		viewCreateInfo.format = depthFormat;
+		viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		if(VKFAILED(vkCreateImageView(m_device, &viewCreateInfo, nullptr, &target.depthView))) {
 			throw std::runtime_error("Failed to create render target depth-stencil image view");
 		}
 	}
@@ -1532,13 +1435,13 @@ RenderTarget Renderer::createRenderTarget(uint32_t width, uint32_t height, uint3
 void Renderer::destroyRenderTarget(RenderTarget& target) const
 {
 	destroyImage(target.colorImage);
-	destroyImage(target.depthStencilImage);
+	destroyImage(target.depthImage);
 
 	if(target.colorView != VK_NULL_HANDLE) {
 		vkDestroyImageView(m_device, target.colorView, nullptr);
 	}
-	if(target.depthStencilView != VK_NULL_HANDLE) {
-		vkDestroyImageView(m_device, target.depthStencilView, nullptr);
+	if(target.depthView != VK_NULL_HANDLE) {
+		vkDestroyImageView(m_device, target.depthView, nullptr);
 	}
 	target = {};
 }
@@ -1835,6 +1738,11 @@ void Renderer::copyToDevice(VkDeviceMemory deviceMemory, const void* data, size_
 	vkFlushMappedMemoryRanges(m_device, 1, &flushRange);
 	vkUnmapMemory(m_device, deviceMemory);
 }
+	
+void Renderer::pipelineBarrier(VkCommandBuffer commandBuffer, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask, const std::vector<ImageMemoryBarrier>& barriers) const
+{
+	vkCmdPipelineBarrier(commandBuffer, srcStageMask, dstStageMask, 0, 0, nullptr, 0, nullptr, (uint32_t)barriers.size(), reinterpret_cast<const VkImageMemoryBarrier*>(barriers.data()));
+}
 
 void Renderer::presentFrame()
 {
@@ -1937,6 +1845,11 @@ PhyDevice Renderer::choosePhyDevice(VkSurfaceKHR surface, const VkPhysicalDevice
 			continue;
 		}
 
+		// Check if all required image formats are supported.
+		if(!checkPhyDeviceImageFormatsSupport(phyDevice)) {
+			continue;
+		}
+
 		int rank = 0;
 
 		// Rank discrete GPUs higher.
@@ -2021,6 +1934,39 @@ void Renderer::queryPhyDeviceSurfaceCapabilities(PhyDevice& phyDevice, VkSurface
 	if(!hasPresentModes) {
 		throw std::runtime_error("Failed to retrieve physical device supported present modes");
 	}
+}
+	
+bool Renderer::checkPhyDeviceImageFormatsSupport(PhyDevice& phyDevice) const
+{
+	VkFormatProperties formatProperties;
+	VkImageFormatProperties imageProperties;
+
+	// Only checking non-mandatory format/usage/feature combinations.
+
+	// Check for depth render target format support.
+	if(VKFAILED(vkGetPhysicalDeviceImageFormatProperties(phyDevice.handle,
+		VK_FORMAT_D32_SFLOAT, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, &imageProperties))) {
+		return false;
+	}
+
+	// Check for BRDF LUT format support.
+	if(VKFAILED(vkGetPhysicalDeviceImageFormatProperties(phyDevice.handle,
+		VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, 0, &imageProperties))) {
+		return false;
+	}
+
+	// Check for equirect environment map format support.
+	if(VKFAILED(vkGetPhysicalDeviceImageFormatProperties(phyDevice.handle,
+		VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &imageProperties))) {
+		return false;
+	}
+	// Check for linear sampling feature.
+	vkGetPhysicalDeviceFormatProperties(phyDevice.handle, VK_FORMAT_R32G32B32A32_SFLOAT, &formatProperties);
+	if(!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+		return false;
+	}
+
+	return true;
 }
 	
 uint32_t Renderer::queryRenderTargetFormatMaxSamples(VkFormat format, VkImageUsageFlags usage) const
