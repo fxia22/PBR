@@ -22,14 +22,14 @@ public:
 		glm::vec3 bitangent;
 		glm::vec2 texcoord;
 	};
-	static_assert(sizeof(Vertex) == 14 * sizeof(float));
+	//static_assert(sizeof(Vertex) == 14 * sizeof(float));
 	static const int NumAttributes = 5;
 
 	struct Face
 	{
 		uint32_t v1, v2, v3;
 	};
-	static_assert(sizeof(Face) == 3 * sizeof(uint32_t));
+	//static_assert(sizeof(Face) == 3 * sizeof(uint32_t));
 
 	static std::shared_ptr<Mesh> fromFile(const std::string& filename);
 	static std::shared_ptr<Mesh> fromString(const std::string& data);

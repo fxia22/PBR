@@ -18,15 +18,15 @@ public:
 class Utility
 {
 public:
-	template<typename T> static constexpr bool isPowerOfTwo(T value)
+	template<typename T> static  bool isPowerOfTwo(T value)
 	{
 		return value != 0 && (value & (value - 1)) == 0;
 	}
-	template<typename T> static constexpr T roundToPowerOfTwo(T value, int POT)
+	template<typename T> static  T roundToPowerOfTwo(T value, int POT)
 	{
 		return (value + POT - 1) & -POT;
 	}
-	template<typename T> static constexpr T numMipmapLevels(T width, T height)
+	template<typename T> static  T numMipmapLevels(T width, T height)
 	{
 		T levels = 1;
 		while((width|height) >> levels) {

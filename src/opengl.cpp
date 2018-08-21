@@ -13,6 +13,8 @@
 #include "common/image.hpp"
 #include "common/utils.hpp"
 #include "opengl.hpp"
+#include <iostream>
+#include <cstring>
 
 namespace OpenGL {
 
@@ -133,17 +135,22 @@ void Renderer::setup()
 		compileShader("shaders/glsl/skybox_fs.glsl", GL_FRAGMENT_SHADER)
 	});
 
-	m_pbrModel = createMeshBuffer(Mesh::fromFile("meshes/cerberus.fbx"));
+	m_pbrModel = createMeshBuffer(Mesh::fromFile("meshes/textured_big.obj"));
 	m_pbrProgram = linkProgram({
 		compileShader("shaders/glsl/pbr_vs.glsl", GL_VERTEX_SHADER),
 		compileShader("shaders/glsl/pbr_fs.glsl", GL_FRAGMENT_SHADER)
 	});
 
-	m_albedoTexture = createTexture(Image::fromFile("textures/cerberus_A.png", 3), GL_RGB, GL_SRGB8);
-	m_normalTexture = createTexture(Image::fromFile("textures/cerberus_N.png", 3), GL_RGB, GL_RGB8);
-	m_metalnessTexture = createTexture(Image::fromFile("textures/cerberus_M.png", 1), GL_RED, GL_R8);
-	m_roughnessTexture = createTexture(Image::fromFile("textures/cerberus_R.png", 1), GL_RED, GL_R8);
+	m_albedoTexture = createTexture(Image::fromFile("textures/texture_map.png", 3), GL_RGB, GL_SRGB8);
 	
+	m_normalTexture = createTexture(Image::fromFile("textures/texture_map_N.png", 3), GL_RGB, GL_RGB8);
+
+
+	m_metalnessTexture = createTexture(Image::fromFile("textures/texture_map_metal.png", 1), GL_RED, GL_R8);
+	m_roughnessTexture = createTexture(Image::fromFile("textures/texture_map_middle.png", 1), GL_RED, GL_R8);
+	
+
+
 	// Unfiltered environment cube map (temporary).
 	Texture envTextureUnfiltered = createTexture(GL_TEXTURE_CUBE_MAP, 1024, 1024, GL_RGBA16F);
 	
@@ -373,6 +380,8 @@ Texture Renderer::createTexture(GLenum target, int width, int height, GLenum int
 	glTextureParameterf(texture.id, GL_TEXTURE_MAX_ANISOTROPY_EXT, m_capabilities.maxAnisotropy);
 	return texture;
 }
+
+
 	
 Texture Renderer::createTexture(const std::shared_ptr<class Image>& image, GLenum format, GLenum internalformat, int levels) const
 {
@@ -383,6 +392,11 @@ Texture Renderer::createTexture(const std::shared_ptr<class Image>& image, GLenu
 	else {
 		glTextureSubImage2D(texture.id, 0, 0, 0, texture.width, texture.height, format, GL_UNSIGNED_BYTE, image->pixels<unsigned char>());
 	}
+
+
+	//std::vector<unsigned char> emptyData(texture.width * texture.height * 3, 0);
+	//glTextureSubImage2D(texture.id, 0, 0, 0, texture.width, texture.height, format, GL_UNSIGNED_BYTE, &emptyData);
+
 
 	if(texture.levels > 1) {
 		glGenerateTextureMipmap(texture.id);
@@ -480,6 +494,7 @@ MeshBuffer Renderer::createMeshBuffer(const std::shared_ptr<class Mesh>& mesh)
 
 	const size_t vertexDataSize = mesh->vertices().size() * sizeof(Mesh::Vertex);
 	const size_t indexDataSize  = mesh->faces().size() * sizeof(Mesh::Face);
+	printf("%d %d\n", vertexDataSize, indexDataSize);
 
 	glCreateBuffers(1, &buffer.vbo);
 	glNamedBufferStorage(buffer.vbo, vertexDataSize, reinterpret_cast<const void*>(&mesh->vertices()[0]), 0);
